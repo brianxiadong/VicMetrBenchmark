@@ -27,8 +27,12 @@ $(document).ready(function () {
         DELETE_DATA: '/api/benchmark/delete-data',
         TEST_CONNECTION: '/api/benchmark/test-connection',
         EXECUTE_QUERY: '/api/benchmark/query',
-        CHECK_HEALTH: '/api/benchmark/health'
+        CHECK_HEALTH: '/api/benchmark/health',
+        RUN_QUERY_TEST: '/api/benchmark/query-test'  // 新增查询测试接口
     };
+
+    // 全局变量，存储查询测试结果
+    let queryTestResults = [];
 
     // 初始化事件绑定
     function init() {
@@ -123,6 +127,12 @@ $(document).ready(function () {
         $('#concurrency').val() && (config.concurrency = parseInt($('#concurrency').val()));
         $('#metricPrefix').val() && (config.metricPrefix = $('#metricPrefix').val());
         $('#apiType').val() && (config.apiType = $('#apiType').val());
+
+        // 查询测试按钮
+        $('#startQueryTest').on('click', startQueryTest);
+
+        // 导出测试结果按钮
+        $('#exportTestResults').on('click', exportTestResults);
     }
 
     // 更新配置信息
@@ -460,10 +470,6 @@ $(document).ready(function () {
         $('#successRequests').text('-');
         $('#failedRequests').text('-');
         $('#totalTime').text('-');
-        $('#avgResponseTime').text('-');
-        $('#minResponseTime').text('-');
-        $('#maxResponseTime').text('-');
-        $('#dataPointsCount').text('-');
         $('#cpuUsage').text('-');
         $('#memoryUsage').text('-');
         $('#storageUsage').text('-');
@@ -475,10 +481,6 @@ $(document).ready(function () {
         $('#successRequests').text(result.successRequests);
         $('#failedRequests').text(result.failedRequests);
         $('#totalTime').text(formatTime(result.totalTimeMillis));
-        $('#avgResponseTime').text(formatTime(result.avgResponseTimeMillis));
-        $('#minResponseTime').text(formatTime(result.minResponseTimeMillis));
-        $('#maxResponseTime').text(formatTime(result.maxResponseTimeMillis));
-        $('#dataPointsCount').text(result.dataPointsCount);
         $('#cpuUsage').text(result.cpuUsagePercent.toFixed(2) + '%');
         $('#memoryUsage').text(result.memoryUsagePercent.toFixed(2) + '%');
         $('#storageUsage').text(result.storageUsageMB.toFixed(2) + ' MB');
@@ -498,6 +500,7 @@ $(document).ready(function () {
         updateConfig();
 
         if (!config.host || !config.port) {
+            alert('请先配置服务器信息');
             return;
         }
 
@@ -505,51 +508,55 @@ $(document).ready(function () {
         $('#cpuUsage').text('加载中...');
         $('#memoryUsage').text('加载中...');
         $('#storageUsage').text('加载中...');
-        $('#currentDataCount').text('加载中...');
-        $('#refreshMetrics').prop('disabled', true).text('刷新中...');
+        $('#totalDataCount').text('加载中...');
 
-        // 获取服务器指标
+        // 禁用刷新按钮
+        const $refreshBtn = $('#refreshMetrics');
+        $refreshBtn.prop('disabled', true).text('刷新中...');
+
         $.ajax({
             url: API.GET_METRICS,
             type: 'POST',
             contentType: 'application/json',
             data: JSON.stringify(config),
             success: function (metrics) {
-                $('#cpuUsage').text(metrics.cpuUsagePercent.toFixed(2) + '%');
-                $('#memoryUsage').text(metrics.memoryUsagePercent.toFixed(2) + '%');
-                $('#storageUsage').text(metrics.storageUsageMB.toFixed(2) + ' MB');
-
-                // 同时获取所有数据量
-                $.ajax({
-                    url: API.GET_DATA_COUNT,
-                    type: 'POST',
-                    contentType: 'application/json',
-                    data: JSON.stringify({
-                        ...config,
-                        metricPrefix: '*'  // 使用通配符获取所有数据量
-                    }),
-                    success: function (response) {
-                        if (response.success === true) {
-                            const count = response.count || 0;
-                            $('#currentDataCount').text(count.toLocaleString());
-                        } else {
-                            $('#currentDataCount').text('查询失败');
-                        }
-                    },
-                    error: function () {
-                        $('#currentDataCount').text('查询失败');
-                    },
-                    complete: function () {
-                        $('#refreshMetrics').prop('disabled', false).text('刷新指标和数据量');
-                    }
-                });
+                if (metrics && !metrics.errorMessage) {
+                    // 更新指标显示
+                    $('#cpuUsage').text(metrics.cpuUsagePercent.toFixed(2) + '%');
+                    $('#memoryUsage').text(metrics.memoryUsagePercent.toFixed(2) + '%');
+                    $('#storageUsage').text(metrics.storageUsageMB.toFixed(2) + ' MB');
+                    $('#totalDataCount').text(metrics.totalDataPointsCount.toLocaleString());
+                } else {
+                    // 显示错误信息
+                    const errorMsg = metrics.errorMessage || '获取指标失败';
+                    $('#cpuUsage').text('获取失败');
+                    $('#memoryUsage').text('获取失败');
+                    $('#storageUsage').text('获取失败');
+                    $('#totalDataCount').text('获取失败');
+                    console.error('获取指标失败:', errorMsg);
+                }
             },
-            error: function () {
+            error: function (xhr, status, error) {
+                // 显示错误信息
                 $('#cpuUsage').text('获取失败');
                 $('#memoryUsage').text('获取失败');
                 $('#storageUsage').text('获取失败');
-                $('#currentDataCount').text('获取失败');
-                $('#refreshMetrics').prop('disabled', false).text('刷新指标和数据量');
+                $('#totalDataCount').text('获取失败');
+                console.error('获取指标请求失败:', error);
+
+                // 在页面上显示错误提示
+                const errorMsg = xhr.responseJSON?.errorMessage || error || '请求失败';
+                $('#dataCount').html(`
+                    <div class="alert alert-danger">
+                        <h4>获取指标失败</h4>
+                        <p>${errorMsg}</p>
+                        <p>请检查服务器连接状态</p>
+                    </div>
+                `);
+            },
+            complete: function () {
+                // 恢复按钮状态
+                $refreshBtn.prop('disabled', false).text('刷新指标和数据量');
             }
         });
     }
@@ -700,6 +707,138 @@ $(document).ready(function () {
                 alert('删除测试数据失败，请检查配置或服务器状态');
             }
         });
+    }
+
+    // 开始查询测试
+    function startQueryTest() {
+        updateConfig();
+
+        if (!validateConfig()) {
+            return;
+        }
+
+        const testName = $('#queryTestName').val().trim();
+        if (!testName) {
+            alert('请输入测试名称');
+            return;
+        }
+
+        const queryCount = parseInt($('#queryCount').val());
+        if (isNaN(queryCount) || queryCount <= 0) {
+            alert('请输入有效的查询次数');
+            return;
+        }
+
+        // 显示进度条
+        $('#queryTestProgress').show();
+        $('#queryTestProgressBar').css('width', '0%').attr('aria-valuenow', 0).text('0%');
+
+        // 禁用按钮
+        $('#startQueryTest').prop('disabled', true).text('测试进行中...');
+
+        // 发送查询测试请求
+        $.ajax({
+            url: API.RUN_QUERY_TEST,
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                ...config,
+                testName: testName,
+                queryCount: queryCount
+            }),
+            success: function (result) {
+                if (result.success) {
+                    // 添加测试结果到表格
+                    addQueryTestResult(result.data);
+
+                    // 更新进度条到100%
+                    updateQueryTestProgress(100);
+
+                    // 显示成功消息
+                    alert('查询测试完成');
+                } else {
+                    alert('查询测试失败: ' + result.error);
+                }
+            },
+            error: function (xhr) {
+                alert('查询测试执行失败，请检查服务器状态');
+                console.error('查询测试失败', xhr);
+            },
+            complete: function () {
+                // 恢复按钮状态
+                $('#startQueryTest').prop('disabled', false).text('开始查询测试');
+                // 延迟隐藏进度条
+                setTimeout(() => {
+                    $('#queryTestProgress').hide();
+                }, 1000);
+            }
+        });
+    }
+
+    // 添加查询测试结果到表格
+    function addQueryTestResult(result) {
+        const row = `
+            <tr>
+                <td>${result.testName}</td>
+                <td>${new Date(result.testTime).toLocaleString()}</td>
+                <td>${result.dataCount.toLocaleString()}</td>
+                <td>${result.queryCount}</td>
+                <td>${formatTime(result.avgResponseTime)}</td>
+                <td>${result.cpuUsage.toFixed(2)}%</td>
+                <td>${result.memoryUsage.toFixed(2)}%</td>
+                <td>${result.storageUsage.toFixed(2)} MB</td>
+            </tr>
+        `;
+        $('#queryTestResults tbody').prepend(row);
+
+        // 保存到全局数组
+        queryTestResults.push(result);
+    }
+
+    // 更新查询测试进度
+    function updateQueryTestProgress(percent) {
+        percent = Math.round(percent);
+        $('#queryTestProgressBar')
+            .css('width', percent + '%')
+            .attr('aria-valuenow', percent)
+            .text(percent + '%');
+    }
+
+    // 导出测试结果
+    function exportTestResults() {
+        if (queryTestResults.length === 0) {
+            alert('没有可导出的测试结果');
+            return;
+        }
+
+        // 创建CSV内容
+        const headers = ['测试名称', '测试时间', '数据量', '查询次数', '平均响应时间', 'CPU使用率', '内存使用率', '存储使用量'];
+        const csvContent = [
+            headers.join(','),
+            ...queryTestResults.map(result => [
+                result.testName,
+                new Date(result.testTime).toLocaleString(),
+                result.dataCount,
+                result.queryCount,
+                result.avgResponseTime,
+                result.cpuUsage,
+                result.memoryUsage,
+                result.storageUsage
+            ].join(','))
+        ].join('\n');
+
+        // 创建下载链接
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+
+        link.setAttribute('href', url);
+        link.setAttribute('download', `query_test_results_${new Date().toISOString().slice(0, 10)}.csv`);
+        link.style.visibility = 'hidden';
+
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
     }
 
     // 初始化

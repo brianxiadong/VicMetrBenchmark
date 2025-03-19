@@ -40,9 +40,14 @@ public class ServerMetrics {
     private double vmQueryLatencyMs;
 
     /**
-     * 数据点总数
+     * 数据点总数（按前缀）
      */
     private long dataPointsCount;
+
+    /**
+     * 总数据点数量（所有指标）
+     */
+    private long totalDataPointsCount;
 
     /**
      * 错误信息
@@ -103,6 +108,14 @@ public class ServerMetrics {
 
     public void setDataPointsCount(long dataPointsCount) {
         this.dataPointsCount = dataPointsCount;
+    }
+
+    public long getTotalDataPointsCount() {
+        return totalDataPointsCount;
+    }
+
+    public void setTotalDataPointsCount(long totalDataPointsCount) {
+        this.totalDataPointsCount = totalDataPointsCount;
     }
 
     public String getErrorMessage() {

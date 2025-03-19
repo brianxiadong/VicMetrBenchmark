@@ -1,9 +1,12 @@
 package com.brianxiadong.vicmetrbenchmark.model;
 
+import lombok.Data;
+
 /**
  * 压测结果模型类
  * 用于存储压测的结果数据
  */
+@Data
 public class BenchmarkResult {
 
     /**
@@ -75,6 +78,12 @@ public class BenchmarkResult {
      * 错误信息
      */
     private String errorMessage;
+
+    private long totalTime;
+    private long totalDataPoints;
+    private double writeRate;
+    private double queryRate;
+    private ServerMetrics serverMetrics;
 
     public long getTotalRequests() {
         return totalRequests;
