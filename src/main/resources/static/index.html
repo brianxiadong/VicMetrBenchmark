@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VictoriaMetrics压测系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+    <div class="container">
+        <h1 class="text-center my-4">VictoriaMetrics压测系统</h1>
+
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">服务器配置</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="host">VictoriaMetrics主机IP</label>
+                            <input type="text" class="form-control" id="host" value="172.36.100.38"
+                                placeholder="例如：192.168.1.100">
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="port">VictoriaMetrics端口</label>
+                            <input type="number" class="form-control" id="port" value="8428">
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <button class="btn btn-info" id="testConnection">测试连接</button>
+                    <span id="connectionStatus" class="ml-3"></span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header bg-success text-white">
+                <h5 class="mb-0">压测配置</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="dataCount">写入数据总量</label>
+                            <input type="number" class="form-control" id="dataCount" value="10000">
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="batchSize">每批次写入量</label>
+                            <input type="number" class="form-control" id="batchSize" value="1000">
+                        </div>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="concurrency">并发线程数</label>
+                            <input type="number" class="form-control" id="concurrency" value="4">
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="form-group">
+                            <label for="apiType">写入接口类型</label>
+                            <select class="form-control" id="apiType">
+                                <option value="prometheus">Prometheus</option>
+                                <option value="influx">InfluxDB</option>
+                                <option value="opentsdb">OpenTSDB</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-md-12">
+                        <div class="form-group">
+                            <label for="metricPrefix">指标名称前缀</label>
+                            <input type="text" class="form-control" id="metricPrefix" value="benchmark_metric">
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <button class="btn btn-primary" id="startBenchmark">开始压测</button>
+                    <button class="btn btn-danger ml-2" id="deleteData">删除测试数据</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header bg-info text-white">
+                <h5 class="mb-0">压测结果</h5>
+            </div>
+            <div class="card-body">
+                <div id="benchmarkProgress" class="progress mb-3" style="display: none;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"
+                        style="width: 100%"></div>
+                </div>
+
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="card mb-3">
+                            <div class="card-header bg-light">写入性能</div>
+                            <div class="card-body">
+                                <table class="table table-striped">
+                                    <tbody>
+                                        <tr>
+                                            <td>总请求数</td>
+                                            <td id="totalRequests">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>成功请求数</td>
+                                            <td id="successRequests">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>失败请求数</td>
+                                            <td id="failedRequests">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>总耗时</td>
+                                            <td id="totalTime">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>平均响应时间</td>
+                                            <td id="avgResponseTime">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>最小响应时间</td>
+                                            <td id="minResponseTime">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>最大响应时间</td>
+                                            <td id="maxResponseTime">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>写入数据点数量</td>
+                                            <td id="dataPointsCount">-</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card mb-3">
+                            <div class="card-header bg-light">服务器指标</div>
+                            <div class="card-body">
+                                <table class="table table-striped">
+                                    <tbody>
+                                        <tr>
+                                            <td>CPU使用率</td>
+                                            <td id="cpuUsage">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>内存使用率</td>
+                                            <td id="memoryUsage">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>存储空间使用</td>
+                                            <td id="storageUsage">-</td>
+                                        </tr>
+                                        <tr>
+                                            <td>数据库当前总数据量</td>
+                                            <td id="currentDataCount">-</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                                <button class="btn btn-info mt-3" id="refreshMetrics">刷新指标</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="js/app.js"></script>
+</body>
+
+</html>
