@@ -3,6 +3,7 @@ package com.brianxiadong.vicmetrbenchmark.service;
 import com.brianxiadong.vicmetrbenchmark.model.BenchmarkRequest;
 import com.brianxiadong.vicmetrbenchmark.model.BenchmarkResult;
 import com.brianxiadong.vicmetrbenchmark.model.ServerMetrics;
+import com.brianxiadong.vicmetrbenchmark.model.QueryTestResult;
 import com.brianxiadong.vicmetrbenchmark.utils.VictoriaMetricsClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Service;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -540,5 +542,84 @@ public class VictoriaMetricsService {
     public ServerMetrics getServerMetrics(BenchmarkRequest request) {
         BenchmarkResult result = new BenchmarkResult();
         return collectServerMetrics(request, result);
+    }
+
+    /**
+     * 执行一轮查询测试
+     * 
+     * @param request     测试请求参数
+     * @param roundNumber 测试轮次
+     * @return 测试结果
+     */
+    public QueryTestResult runQueryTest(BenchmarkRequest request, int roundNumber) {
+        QueryTestResult result = new QueryTestResult();
+        result.setTestId(UUID.randomUUID().toString());
+        result.setTestTime(LocalDateTime.now());
+        result.setRoundNumber(roundNumber);
+
+        try {
+            // 记录开始时间
+            long startTime = System.currentTimeMillis();
+
+            // 获取总数据量
+            long totalDataPoints = queryTotalDataCount();
+            result.setTotalDataPoints(totalDataPoints);
+
+            // 执行查询测试
+            long queryStartTime = System.currentTimeMillis();
+            long dataCount = queryDataCount(request);
+            long queryEndTime = System.currentTimeMillis();
+
+            // 获取服务器指标
+            ServerMetrics serverMetrics = collectServerMetrics(request, new BenchmarkResult());
+
+            // 设置测试结果
+            result.setQueryTimeMillis(queryEndTime - queryStartTime);
+            result.setCpuUsagePercent(serverMetrics.getCpuUsagePercent());
+            result.setMemoryUsagePercent(serverMetrics.getMemoryUsagePercent());
+            result.setStorageUsageMB(serverMetrics.getStorageUsageMB());
+            result.setStatus("success");
+
+            log.info("查询测试完成 - 轮次: {}, 总数据量: {}, 查询耗时: {}ms, CPU使用率: {}%, 内存使用率: {}%",
+                    roundNumber, totalDataPoints, result.getQueryTimeMillis(),
+                    result.getCpuUsagePercent(), result.getMemoryUsagePercent());
+
+        } catch (Exception e) {
+            log.error("查询测试失败", e);
+            result.setStatus("failed");
+            result.setErrorMessage(e.getMessage());
+        }
+
+        return result;
+    }
+
+    /**
+     * 导出测试结果为CSV格式
+     * 
+     * @param results 测试结果列表
+     * @return CSV格式的字符串
+     */
+    public String exportTestResultsToCsv(List<QueryTestResult> results) {
+        StringBuilder csv = new StringBuilder();
+        // 添加CSV头部
+        csv.append("测试ID,测试时间,测试轮次,总数据量,查询耗时(ms),CPU使用率(%),内存使用率(%),存储使用量(MB),测试描述,状态,错误信息\n");
+
+        // 添加数据行
+        for (QueryTestResult result : results) {
+            csv.append(String.format("%s,%s,%d,%d,%d,%.2f,%.2f,%.2f,%s,%s,%s\n",
+                    result.getTestId(),
+                    result.getTestTime(),
+                    result.getRoundNumber(),
+                    result.getTotalDataPoints(),
+                    result.getQueryTimeMillis(),
+                    result.getCpuUsagePercent(),
+                    result.getMemoryUsagePercent(),
+                    result.getStorageUsageMB(),
+                    result.getDescription() != null ? result.getDescription() : "",
+                    result.getStatus(),
+                    result.getErrorMessage() != null ? result.getErrorMessage() : ""));
+        }
+
+        return csv.toString();
     }
 }
