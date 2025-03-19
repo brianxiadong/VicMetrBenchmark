@@ -225,8 +225,21 @@ EOF
             echo "错误: delete操作需要metric前缀参数" >&2
             exit 1
         fi
-        curl -s -X POST "${BASE_URL}/api/v1/admin/tsdb/delete_series" --data-urlencode "match[]={$1.*}"
-        echo "删除操作完成"
+        
+        # 构建删除请求
+        MATCH_PATTERN="^${1}.*"
+        response=$(curl -s -X POST "${BASE_URL}/api/v1/admin/tsdb/delete_series" \
+            --data-urlencode "match[]={__name__=~\"${MATCH_PATTERN}\"}")
+        
+        # 检查删除操作是否成功
+        # VictoriaMetrics 的删除 API 即使成功也会返回非零状态码
+        # 所以我们主要检查响应内容是否包含错误信息
+        if [[ $response == *"error"* ]]; then
+            echo "{\"status\":\"error\",\"message\":\"删除操作失败\",\"details\":\"$response\"}"
+            exit 1
+        else
+            echo "{\"status\":\"success\",\"message\":\"成功删除匹配模式 ${MATCH_PATTERN} 的数据\"}"
+        fi
         ;;
         
     "query")
