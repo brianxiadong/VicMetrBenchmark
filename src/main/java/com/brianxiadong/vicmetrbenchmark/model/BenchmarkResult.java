@@ -71,6 +71,11 @@ public class BenchmarkResult {
      */
     private long endTimestamp;
 
+    /**
+     * 错误信息
+     */
+    private String errorMessage;
+
     public long getTotalRequests() {
         return totalRequests;
     }
@@ -173,5 +178,13 @@ public class BenchmarkResult {
 
     public void setEndTimestamp(long endTimestamp) {
         this.endTimestamp = endTimestamp;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
     }
 }

@@ -39,6 +39,16 @@ public class ServerMetrics {
      */
     private double vmQueryLatencyMs;
 
+    /**
+     * 数据点总数
+     */
+    private long dataPointsCount;
+
+    /**
+     * 错误信息
+     */
+    private String errorMessage;
+
     public double getCpuUsagePercent() {
         return cpuUsagePercent;
     }
@@ -85,5 +95,21 @@ public class ServerMetrics {
 
     public void setVmQueryLatencyMs(double vmQueryLatencyMs) {
         this.vmQueryLatencyMs = vmQueryLatencyMs;
+    }
+
+    public long getDataPointsCount() {
+        return dataPointsCount;
+    }
+
+    public void setDataPointsCount(long dataPointsCount) {
+        this.dataPointsCount = dataPointsCount;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
     }
 }

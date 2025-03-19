@@ -7,10 +7,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import okhttp3.*;
 import org.springframework.stereotype.Service;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
@@ -18,21 +19,33 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * VictoriaMetrics服务类
  * 实现与VictoriaMetrics的交互，包括写入压测、查询数据、删除数据等功能
+ * 所有HTTP请求都通过脚本执行，以支持VPN访问
  */
 @Service
 public class VictoriaMetricsService {
 
     private static final Logger log = LoggerFactory.getLogger(VictoriaMetricsService.class);
-    private final OkHttpClient httpClient;
     private final ObjectMapper objectMapper;
 
     public VictoriaMetricsService() {
-        this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .build();
         this.objectMapper = new ObjectMapper();
+    }
+
+    /**
+     * 简单测试连接
+     * 仅测试VictoriaMetrics是否可访问，而不返回复杂数据
+     * 
+     * @param request 包含服务器信息的请求
+     * @return 连接是否成功
+     */
+    public boolean testConnection(BenchmarkRequest request) {
+        try {
+            String response = executeScript(request, "health");
+            return response.contains("ok");
+        } catch (Exception e) {
+            log.warn("连接测试失败: {}", e.getMessage());
+            return false;
+        }
     }
 
     /**
@@ -44,6 +57,20 @@ public class VictoriaMetricsService {
     public BenchmarkResult runBenchmark(BenchmarkRequest request) {
         BenchmarkResult result = new BenchmarkResult();
         result.setStartTimestamp(System.currentTimeMillis());
+
+        // 验证参数
+        if (request.getDataCount() == null || request.getDataCount() <= 0) {
+            result.setErrorMessage("数据量必须大于0");
+            return result;
+        }
+
+        if (request.getBatchSize() == null || request.getBatchSize() <= 0) {
+            request.setBatchSize(1000); // 默认值
+        }
+
+        if (request.getConcurrency() == null || request.getConcurrency() <= 0) {
+            request.setConcurrency(1); // 默认值
+        }
 
         int totalCount = request.getDataCount();
         int batchSize = request.getBatchSize();
@@ -96,9 +123,16 @@ public class VictoriaMetricsService {
         }
 
         try {
-            latch.await();
+            if (!latch.await(30, TimeUnit.MINUTES)) {
+                result.setErrorMessage("压测执行超时");
+                executor.shutdownNow();
+                return result;
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            result.setErrorMessage("压测被中断");
+            executor.shutdownNow();
+            return result;
         }
 
         executor.shutdown();
@@ -122,6 +156,7 @@ public class VictoriaMetricsService {
             collectServerMetrics(request, result);
         } catch (Exception e) {
             log.error("收集服务器指标失败", e);
+            result.setErrorMessage("收集服务器指标失败: " + e.getMessage());
         }
 
         return result;
@@ -137,43 +172,43 @@ public class VictoriaMetricsService {
      * @return 是否成功
      */
     private boolean sendBatch(BenchmarkRequest request, int batchSize, int threadId, int batchId) {
-        try {
-            String url = getWriteUrl(request);
-            String data = generateData(request, batchSize, threadId, batchId);
+        int maxRetries = 3;
+        int baseRetryDelay = 1000; // 基础重试延迟1秒
+        double backoffMultiplier = 2.0; // 指数退避乘数
 
-            RequestBody requestBody = RequestBody.create(MediaType.parse("text/plain"), data);
-            Request httpRequest = new Request.Builder()
-                    .url(url)
-                    .post(requestBody)
-                    .build();
+        for (int i = 0; i < maxRetries; i++) {
+            try {
+                String data = generateData(request, batchSize, threadId, batchId);
+                String response = executeScript(request, "write", data);
 
-            try (Response response = httpClient.newCall(httpRequest).execute()) {
-                return response.isSuccessful();
+                if (response.contains("success")) {
+                    return true;
+                }
+
+                log.warn("批次发送失败 - 线程ID: {}, 批次ID: {}, 重试次数: {}, 响应: {}",
+                        threadId, batchId, i + 1, response);
+
+                // 如果是502错误，增加重试延迟
+                if (response.contains("502")) {
+                    int retryDelay = (int) (baseRetryDelay * Math.pow(backoffMultiplier, i));
+                    log.info("遇到502错误，等待{}毫秒后重试", retryDelay);
+                    Thread.sleep(retryDelay);
+                    continue;
+                }
+            } catch (Exception e) {
+                log.warn("第{}次发送批次失败 - 线程ID: {}, 批次ID: {}, 错误: {}",
+                        i + 1, threadId, batchId, e.getMessage());
+                if (i < maxRetries - 1) {
+                    try {
+                        int retryDelay = (int) (baseRetryDelay * Math.pow(backoffMultiplier, i));
+                        Thread.sleep(retryDelay);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
             }
-        } catch (Exception e) {
-            log.error("发送批次数据失败", e);
-            return false;
         }
-    }
-
-    /**
-     * 获取写入URL
-     * 
-     * @param request 压测请求参数
-     * @return URL
-     */
-    private String getWriteUrl(BenchmarkRequest request) {
-        String baseUrl = "http://" + request.getHost() + ":" + request.getPort();
-        switch (request.getApiType().toLowerCase()) {
-            case "prometheus":
-                return baseUrl + "/api/v1/import/prometheus";
-            case "influx":
-                return baseUrl + "/api/v1/import/influx";
-            case "opentsdb":
-                return baseUrl + "/api/v1/import/opentsdb";
-            default:
-                return baseUrl + "/api/v1/import/prometheus";
-        }
+        return false;
     }
 
     /**
@@ -187,7 +222,7 @@ public class VictoriaMetricsService {
      */
     private String generateData(BenchmarkRequest request, int batchSize, int threadId, int batchId) {
         StringBuilder data = new StringBuilder();
-        long timestamp = System.currentTimeMillis();
+        long timestamp = System.currentTimeMillis(); // 使用毫秒级时间戳
 
         switch (request.getApiType().toLowerCase()) {
             case "prometheus":
@@ -212,12 +247,10 @@ public class VictoriaMetricsService {
                             .append(",index=").append(i)
                             .append(",test_id=benchmark_test ")
                             .append("value=").append(Math.random() * 100)
-                            .append(" ").append(timestamp + i).append("000000")
+                            .append(" ").append(timestamp * 1000000) // 转换为纳秒时间戳
                             .append("\n");
                 }
                 break;
-
-            // 可以添加其他类型的数据格式...
 
             default:
                 // 默认使用Prometheus格式
@@ -244,42 +277,15 @@ public class VictoriaMetricsService {
      * @param result  压测结果
      */
     private void collectServerMetrics(BenchmarkRequest request, BenchmarkResult result) {
-        // 查询系统指标，这通常需要通过VictoriaMetrics自身的metrics接口或其他方式获取
-        // 这里简化实现，可以通过查询特定的系统指标或估算
-        String baseUrl = "http://" + request.getHost() + ":" + request.getPort();
-
         try {
-            // 获取VM自身的指标
-            Request metricsRequest = new Request.Builder()
-                    .url(baseUrl + "/metrics")
-                    .get()
-                    .build();
+            String response = executeScript(request, "metrics");
+            JsonNode root = objectMapper.readTree(response);
 
-            try (Response response = httpClient.newCall(metricsRequest).execute()) {
-                if (response.isSuccessful() && response.body() != null) {
-                    String metricsText = response.body().string();
-
-                    // 解析CPU使用率
-                    double cpuUsage = extractMetricValue(metricsText, "process_cpu_seconds_total");
-                    result.setCpuUsagePercent(cpuUsage * 100); // 转换为百分比
-
-                    // 解析内存使用率
-                    double memUsage = extractMetricValue(metricsText, "go_memstats_alloc_bytes");
-                    double memTotal = extractMetricValue(metricsText, "go_memstats_sys_bytes");
-                    if (memTotal > 0) {
-                        result.setMemoryUsagePercent((memUsage / memTotal) * 100);
-                    }
-
-                    // 解析存储空间
-                    double storageSize = extractMetricValue(metricsText, "vm_storage_data_size_bytes");
-                    result.setStorageUsageMB(storageSize / (1024 * 1024)); // 转换为MB
-                }
-            }
-
-            // 获取已写入的数据量
-            long dataCount = queryDataCount(request);
-            // 设置到结果中
-            result.setDataPointsCount(dataCount);
+            // 从JSON中提取指标值
+            result.setCpuUsagePercent(root.get("cpuUsagePercent").asDouble());
+            result.setMemoryUsagePercent(root.get("memoryUsagePercent").asDouble());
+            result.setStorageUsageMB(root.get("storageUsageMB").asDouble());
+            result.setDataPointsCount(root.get("dataPointsCount").asLong());
 
         } catch (Exception e) {
             log.error("收集服务器指标失败", e);
@@ -287,179 +293,142 @@ public class VictoriaMetricsService {
     }
 
     /**
-     * 从指标文本中提取特定指标的值
+     * 使用脚本执行VictoriaMetrics操作
      * 
-     * @param metricsText 指标文本
-     * @param metricName  指标名称
-     * @return 指标值
+     * @param request   请求参数
+     * @param operation 操作类型
+     * @param args      额外参数
+     * @return 执行结果
      */
-    private double extractMetricValue(String metricsText, String metricName) {
+    public String executeScript(BenchmarkRequest request, String operation, String... args) {
         try {
-            String[] lines = metricsText.split("\n");
-            for (String line : lines) {
-                if (line.startsWith(metricName + " ") || line.startsWith(metricName + "{")) {
-                    String[] parts = line.split(" ");
-                    if (parts.length >= 2) {
-                        return Double.parseDouble(parts[parts.length - 1]);
-                    }
-                }
+            // 构建命令
+            List<String> command = new ArrayList<>();
+            command.add("bash");
+            command.add("src/main/resources/scripts/vic_metrics_query.sh");
+            command.add(request.getHost());
+            command.add(String.valueOf(request.getPort()));
+            command.add(operation);
+            command.addAll(Arrays.asList(args));
+
+            // 执行命令
+            ProcessBuilder processBuilder = new ProcessBuilder(command);
+            processBuilder.redirectErrorStream(true);
+            Process process = processBuilder.start();
+
+            // 读取输出
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            StringBuilder output = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
             }
+
+            // 等待命令执行完成
+            boolean completed = process.waitFor(30, TimeUnit.SECONDS);
+            if (!completed) {
+                process.destroyForcibly();
+                throw new RuntimeException("命令执行超时");
+            }
+
+            int exitCode = process.exitValue();
+            if (exitCode != 0) {
+                throw new RuntimeException("命令执行失败，退出码: " + exitCode);
+            }
+
+            return output.toString();
         } catch (Exception e) {
-            log.error("提取指标值失败: " + metricName, e);
+            log.error("执行脚本失败: {}", e.getMessage());
+            throw new RuntimeException("执行脚本失败: " + e.getMessage());
         }
-        return 0;
     }
 
     /**
-     * 查询数据总量
+     * 使用脚本统计数据量
      * 
-     * @param request 压测请求参数
-     * @return 数据总量
+     * @param request 请求参数
+     * @return 数据量
      */
     public long queryDataCount(BenchmarkRequest request) {
-        String baseUrl = "http://" + request.getHost() + ":" + request.getPort();
-        String query = "count(" + request.getMetricPrefix() + "*)";
-
         try {
-            HttpUrl url = HttpUrl.parse(baseUrl + "/api/v1/query")
-                    .newBuilder()
-                    .addQueryParameter("query", query)
-                    .build();
+            String response = executeScript(request, "count", request.getMetricPrefix());
+            JsonNode root = objectMapper.readTree(response);
 
-            Request httpRequest = new Request.Builder()
-                    .url(url)
-                    .get()
-                    .build();
-
-            try (Response response = httpClient.newCall(httpRequest).execute()) {
-                if (response.isSuccessful() && response.body() != null) {
-                    String responseBody = response.body().string();
-                    JsonNode root = objectMapper.readTree(responseBody);
-
-                    if (root.has("data") && root.get("data").has("result")
-                            && root.get("data").get("result").isArray()) {
-                        JsonNode results = root.get("data").get("result");
-                        if (results.size() > 0 && results.get(0).has("value")
-                                && results.get(0).get("value").isArray()) {
-                            JsonNode value = results.get(0).get("value");
-                            if (value.size() > 1) {
-                                String countStr = value.get(1).asText();
-                                return Long.parseLong(countStr);
-                            }
-                        }
+            // 检查响应状态
+            if (root.has("status") && "success".equals(root.get("status").asText())) {
+                // 检查是否有count字段
+                if (root.has("count")) {
+                    return root.get("count").asLong();
+                }
+                // 检查是否有data字段
+                if (root.has("data")) {
+                    JsonNode data = root.get("data");
+                    if (data.isArray() && data.size() > 0) {
+                        return data.get(0).asLong();
+                    }
+                    if (data.isObject() && data.has("count")) {
+                        return data.get("count").asLong();
                     }
                 }
             }
-        } catch (Exception e) {
-            log.error("查询数据总量失败", e);
-        }
 
-        return 0;
+            // 如果解析失败，记录错误信息
+            log.error("无法从响应中解析数据量: {}", response);
+            return 0;
+        } catch (Exception e) {
+            log.error("统计数据量失败: {}", e.getMessage());
+            return 0;
+        }
     }
 
     /**
-     * 删除测试数据
+     * 使用脚本删除数据
      * 
-     * @param request 包含服务器信息的请求
+     * @param request 请求参数
      * @return 是否成功
      */
     public boolean deleteTestData(BenchmarkRequest request) {
-        String baseUrl = "http://" + request.getHost() + ":" + request.getPort();
-
         try {
-            // 构建删除请求 - VictoriaMetrics提供了删除接口
-            HttpUrl url = HttpUrl.parse(baseUrl + "/api/v1/admin/tsdb/delete_series")
-                    .newBuilder()
-                    .addQueryParameter("match[]", request.getMetricPrefix() + "*{test_id=\"benchmark_test\"}")
-                    .build();
-
-            Request httpRequest = new Request.Builder()
-                    .url(url)
-                    .post(RequestBody.create(MediaType.parse("text/plain"), ""))
-                    .build();
-
-            try (Response response = httpClient.newCall(httpRequest).execute()) {
-                return response.isSuccessful();
-            }
+            String response = executeScript(request, "delete", request.getMetricPrefix());
+            return response.contains("删除操作完成");
         } catch (Exception e) {
-            log.error("删除测试数据失败", e);
+            log.error("删除数据失败", e);
             return false;
         }
     }
 
     /**
-     * 获取服务器实时指标
+     * 使用脚本获取服务器指标
      * 
-     * @param request 包含服务器信息的请求
+     * @param request 请求参数
      * @return 服务器指标
      */
     public ServerMetrics getServerMetrics(BenchmarkRequest request) {
         ServerMetrics metrics = new ServerMetrics();
-        String baseUrl = "http://" + request.getHost() + ":" + request.getPort();
-
         try {
-            // 获取VM自身的指标
-            Request metricsRequest = new Request.Builder()
-                    .url(baseUrl + "/metrics")
-                    .get()
-                    .build();
+            String response = executeScript(request, "metrics");
+            JsonNode root = objectMapper.readTree(response);
 
-            try (Response response = httpClient.newCall(metricsRequest).execute()) {
-                if (response.isSuccessful() && response.body() != null) {
-                    String metricsText = response.body().string();
+            // 从JSON中提取指标值
+            metrics.setCpuUsagePercent(root.get("cpuUsagePercent").asDouble());
+            metrics.setMemoryUsagePercent(root.get("memoryUsagePercent").asDouble());
+            metrics.setStorageUsageMB(root.get("storageUsageMB").asDouble());
+            metrics.setTotalStorageMB(root.get("totalStorageMB").asDouble());
+            metrics.setVmDataSizeMB(root.get("vmDataSizeMB").asDouble());
+            metrics.setVmQueryLatencyMs(root.get("vmQueryLatencyMs").asDouble());
 
-                    // 解析CPU使用率
-                    double cpuUsage = extractMetricValue(metricsText, "process_cpu_seconds_total");
-                    metrics.setCpuUsagePercent(cpuUsage * 100); // 转换为百分比
-
-                    // 解析内存使用率
-                    double memUsage = extractMetricValue(metricsText, "go_memstats_alloc_bytes");
-                    double memTotal = extractMetricValue(metricsText, "go_memstats_sys_bytes");
-                    if (memTotal > 0) {
-                        metrics.setMemoryUsagePercent((memUsage / memTotal) * 100);
-                    }
-
-                    // 解析存储空间
-                    double storageSize = extractMetricValue(metricsText, "vm_storage_data_size_bytes");
-                    metrics.setVmDataSizeMB(storageSize / (1024 * 1024)); // 转换为MB
-                }
+            // 获取数据量
+            if (root.has("dataPointsCount")) {
+                metrics.setDataPointsCount(root.get("dataPointsCount").asLong());
             }
 
-            // 获取查询延迟
-            HttpUrl url = HttpUrl.parse(baseUrl + "/api/v1/query")
-                    .newBuilder()
-                    .addQueryParameter("query", "avg_over_time(vm_request_duration_seconds[5m])")
-                    .build();
-
-            Request httpRequest = new Request.Builder()
-                    .url(url)
-                    .get()
-                    .build();
-
-            try (Response response = httpClient.newCall(httpRequest).execute()) {
-                if (response.isSuccessful() && response.body() != null) {
-                    String responseBody = response.body().string();
-                    JsonNode root = objectMapper.readTree(responseBody);
-
-                    if (root.has("data") && root.get("data").has("result")
-                            && root.get("data").get("result").isArray()) {
-                        JsonNode results = root.get("data").get("result");
-                        if (results.size() > 0 && results.get(0).has("value")
-                                && results.get(0).get("value").isArray()) {
-                            JsonNode value = results.get(0).get("value");
-                            if (value.size() > 1) {
-                                String latencyStr = value.get(1).asText();
-                                metrics.setVmQueryLatencyMs(Double.parseDouble(latencyStr) * 1000); // 转换为毫秒
-                            }
-                        }
-                    }
-                }
+            if (root.has("errorMessage") && !root.get("errorMessage").isNull()) {
+                metrics.setErrorMessage(root.get("errorMessage").asText());
             }
-
         } catch (Exception e) {
             log.error("获取服务器指标失败", e);
+            metrics.setErrorMessage("获取服务器指标失败: " + e.getMessage());
         }
-
         return metrics;
     }
 }
